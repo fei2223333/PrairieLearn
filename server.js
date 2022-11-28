@@ -1,5 +1,6 @@
 // IMPORTANT: this must come first so that it can properly instrument our
 // dependencies like `pg` and `express`.
+//
 const opentelemetry = require('@prairielearn/opentelemetry');
 
 const ERR = require('async-stacktrace');
@@ -25,6 +26,10 @@ const filesize = require('filesize');
 const url = require('url');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const Sentry = require('@prairielearn/sentry');
+const base32 = require('base32')
+const totp = require("totp-generator");
+const OTPAuth = require("otpauth");
+const _ = require('lodash');
 
 const logger = require('./lib/logger');
 const config = require('./lib/config');
@@ -52,7 +57,8 @@ const namedLocks = require('./lib/named-locks');
 const nodeMetrics = require('./lib/node-metrics');
 const { isEnterprise } = require('./lib/license');
 const { enrichSentryScope } = require('./lib/sentry');
-const lifecycleHooks = require('./lib/lifecycle-hooks');
+
+const access_map = {};
 
 process.on('warning', (e) => console.warn(e));
 
@@ -425,13 +431,10 @@ module.exports.initExpress = function () {
   app.use('/pl/oauth2login', require('./pages/authLoginOAuth2/authLoginOAuth2'));
   app.use('/pl/oauth2callback', require('./pages/authCallbackOAuth2/authCallbackOAuth2'));
   app.use(/\/pl\/shibcallback/, require('./pages/authCallbackShib/authCallbackShib'));
+  app.use('/pl/azure_login', require('./pages/authLoginAzure/authLoginAzure'));
+  app.use('/pl/azure_callback', require('./pages/authCallbackAzure/authCallbackAzure'));
 
   if (isEnterprise()) {
-    if (config.hasAzure) {
-      app.use('/pl/azure_login', require('./ee/auth/azure/login'));
-      app.use('/pl/azure_callback', require('./ee/auth/azure/callback'));
-    }
-
     app.use('/pl/auth/institution/:institution_id/saml', require('./ee/auth/saml/router'));
   }
 
@@ -445,9 +448,6 @@ module.exports.initExpress = function () {
   if (isEnterprise()) {
     app.use('/pl/prairietest/auth', require('./ee/auth/prairietest'));
   }
-
-  // Must come before CSRF middleware; we do our own signature verification here.
-  app.use('/pl/webhooks/terminate', require('./webhooks/terminate'));
 
   app.use(require('./middlewares/csrfToken')); // sets and checks res.locals.__csrf_token
   app.use(require('./middlewares/logRequest'));
@@ -553,10 +553,8 @@ module.exports.initExpress = function () {
       next();
     },
     require('./middlewares/authzWorkspace'),
+    require('./pages/workspace/workspace'),
   ]);
-  app.use('/pl/workspace/:workspace_id', require('./pages/workspace/workspace'));
-  app.use('/pl/workspace/:workspace_id/logs', require('./pages/workspaceLogs/workspaceLogs'));
-
   // dev-mode pages are mounted for both out-of-course access (here) and within-course access (see below)
   if (config.devMode) {
     app.use('/pl/loadFromDisk', [
@@ -803,6 +801,7 @@ module.exports.initExpress = function () {
     },
     require('./pages/instructorAssessmentAccess/instructorAssessmentAccess'),
   ]);
+
   app.use(
     '/pl/course_instance/:course_instance_id/instructor/assessment/:assessment_id/assessment_statistics',
     [
@@ -1287,13 +1286,61 @@ module.exports.initExpress = function () {
       require('./pages/studentAssessmentInstanceTimeRemaining/studentAssessmentInstanceTimeRemaining'),
     ]
   );
+
+  function generateTOTP(seed, assessmentId){
+    const totp = new OTPAuth.TOTP({
+      issuer: "ACME",
+      label: "AzureDiamond",
+      algorithm: "SHA256",
+      digits: 6,
+      period: 300,
+      secret: base32.encode(seed), // or 'OTPAuth.Secret.fromBase32("NB2W45DFOIZA")'
+    });
+    access_map.assessmentId = {
+      totp,
+      token: totp.generate()
+    }
+  }
+
   app.use('/pl/course_instance/:course_instance_id/assessment_instance/:assessment_instance_id', [
     require('./middlewares/selectAndAuthzAssessmentInstance'),
     require('./middlewares/logPageView')('studentAssessmentInstance'),
     require('./middlewares/studentAssessmentAccess'),
+    function (req, res, next) {
+      let seed = 50;
+      assessmentId = res.locals.assessment.uuid;
+      if(!access_map.assessmentId)generateTOTP(seed, assessmentId);
+      next();
+    },
     require('./pages/studentAssessmentInstanceHomework/studentAssessmentInstanceHomework'),
     require('./pages/studentAssessmentInstanceExam/studentAssessmentInstanceExam'),
   ]);
+
+  app.get('/pl/course_instance/:course_instance_id/access_question/:access_code/assessment/:assessment_id',(req, res, next)=>{
+    let seed = 50;
+    let access_code = req.params.access_code;
+    const assessmentId = req.params.assessment_id
+    if(access_map.assessmentId){
+      token = access_map.assessmentId.token;
+      assessment_totp = access_map.assessmentId.totp;
+      console.log('access_code:',access_code);
+      console.log('token:',token);
+      console.log('is valid:',assessment_totp.validate({token: access_code, window: 1}))
+      if(assessment_totp.validate({token: access_code, window: 1}) == 0){
+        res.send("success");
+      }else{
+        if(access_code == token){
+          generateTOTP(seed, assessmentId);
+          res.status(400).send('time out');
+        }else{
+          res.status(400).send('fail to pass verification')
+        }
+      }
+    }else{
+      generateTOTP(seed, assessmentId);
+      res.status(400).send("please try again");
+    }
+  })
 
   app.use('/pl/course_instance/:course_instance_id/instance_question/:instance_question_id', [
     require('./middlewares/selectAndAuthzInstanceQuestion'),
@@ -1302,6 +1349,7 @@ module.exports.initExpress = function () {
     require('./pages/studentInstanceQuestionHomework/studentInstanceQuestionHomework'),
     require('./pages/studentInstanceQuestionExam/studentInstanceQuestionExam'),
   ]);
+
   app.use('/pl/course_instance/:course_instance_id/report_cheating', [
     function (req, res, next) {
       res.locals.navSubPage = 'report_cheating';
@@ -1309,6 +1357,7 @@ module.exports.initExpress = function () {
     },
     require('./pages/studentReportCheating/studentReportCheating'),
   ]);
+
   if (config.devMode) {
     app.use(
       '/pl/course_instance/:course_instance_id/loadFromDisk',
@@ -1736,7 +1785,6 @@ module.exports.startServer = async () => {
 
 module.exports.stopServer = function (callback) {
   if (!server) return callback(new Error('cannot stop an undefined server'));
-  if (!server.listening) return callback(null);
   server.close(function (err) {
     if (ERR(err, callback)) return;
     callback(null);
@@ -1841,10 +1889,41 @@ if (config.startServer) {
         }
       },
       async () => {
-        if (isEnterprise() && config.hasAzure) {
-          const { getAzureStrategy } = require('./ee/auth/azure/index');
-          passport.use(getAzureStrategy());
-        }
+        if (!config.hasAzure) return;
+
+        let OIDCStrategy = require('passport-azure-ad').OIDCStrategy;
+        const azureConfig = {
+          identityMetadata: config.azureIdentityMetadata,
+          clientID: config.azureClientID,
+          responseType: config.azureResponseType,
+          responseMode: config.azureResponseMode,
+          redirectUrl: config.azureRedirectUrl,
+          allowHttpForRedirectUrl: config.azureAllowHttpForRedirectUrl,
+          clientSecret: config.azureClientSecret,
+          validateIssuer: config.azureValidateIssuer,
+          isB2C: config.azureIsB2C,
+          issuer: config.azureIssuer,
+          passReqToCallback: config.azurePassReqToCallback,
+          scope: config.azureScope,
+          loggingLevel: config.azureLoggingLevel,
+          nonceLifetime: config.azureNonceLifetime,
+          nonceMaxAmount: config.azureNonceMaxAmount,
+          useCookieInsteadOfSession: config.azureUseCookieInsteadOfSession,
+          cookieEncryptionKeys: config.azureCookieEncryptionKeys,
+          clockSkew: config.azureClockSkew,
+        };
+        passport.use(
+          new OIDCStrategy(azureConfig, function (
+            iss,
+            sub,
+            profile,
+            accessToken,
+            refreshToken,
+            done
+          ) {
+            return done(null, profile);
+          })
+        );
       },
       async () => {
         if (isEnterprise()) {
@@ -1981,7 +2060,12 @@ if (config.startServer) {
         logger.verbose('Starting server...');
         await module.exports.startServer();
       },
-      async () => socketServer.init(server),
+      function (callback) {
+        socketServer.init(server, function (err) {
+          if (ERR(err, callback)) return;
+          callback(null);
+        });
+      },
       function (callback) {
         externalGradingSocket.init(function (err) {
           if (ERR(err, callback)) return;
@@ -1995,16 +2079,31 @@ if (config.startServer) {
         });
       },
       async () => workspace.init(),
-      async () => serverJobs.init(),
-      async () => nodeMetrics.init(),
+      function (callback) {
+        serverJobs.init(function (err) {
+          if (ERR(err, callback)) return;
+          callback(null);
+        });
+      },
+      function (callback) {
+        nodeMetrics.init();
+        callback(null);
+      },
       // These should be the last things to start before we actually start taking
       // requests, as they may actually end up executing course code.
-      async () => {
-        if (!config.externalGradingEnableResults) return;
-        await externalGraderResults.init();
+      (callback) => {
+        if (!config.externalGradingEnableResults) return callback(null);
+        externalGraderResults.init((err) => {
+          if (ERR(err, callback)) return;
+          callback(null);
+        });
       },
-      async () => cron.init(),
-      async () => lifecycleHooks.completeInstanceLaunch(),
+      function (callback) {
+        cron.init(function (err) {
+          if (ERR(err, callback)) return;
+          callback(null);
+        });
+      },
     ],
     function (err, data) {
       if (err) {
@@ -2020,52 +2119,13 @@ if (config.startServer) {
           process.exit(0);
         }
 
-        // SIGTERM can be used to gracefully shut down the process. This signal
-        // may come from another process, but we also send it to ourselves if
-        // we want to gracefully shut down. This is used below in the ASG
-        // lifecycle handler, and also within the "terminate" webhook.
-        process.once('SIGTERM', async () => {
-          // By this point, we should no longer be attached to the load balancer,
-          // so there's no point shutting down the HTTP server or the socket.io
-          // server.
-          //
-          // We use `allSettled()` here to ensure that all tasks can gracefully
-          // shut down, even if some of them fail.
-          logger.info('Shutting down async processing');
-          const results = await Promise.allSettled([
-            externalGraderResults.stop(),
-            cron.stop(),
-            serverJobs.stop(),
-          ]);
-          results.forEach((r) => {
-            if (r.status === 'rejected') {
-              logger.error('Error shutting down async processing', r.reason);
-              Sentry.captureException(r.reason);
-            }
-          });
-
-          try {
-            await lifecycleHooks.completeInstanceTermination();
-          } catch (err) {
-            logger.error('Error completing instance termination', err);
-            Sentry.captureException(err);
-          }
-
-          logger.info('Terminating...');
-          // Shut down OpenTelemetry exporting.
-          try {
-            opentelemetry.shutdown();
-          } catch (err) {
-            logger.error('Error shutting down OpenTelemetry', err);
-            Sentry.captureException(err);
-          }
-
-          // Flush all events to Sentry.
-          try {
-            await Sentry.flush();
-          } finally {
-            process.exit(0);
-          }
+        process.on('SIGTERM', () => {
+          opentelemetry
+            .shutdown()
+            .catch((err) => logger.error('Error shutting down OpenTelemetry', err))
+            .finally(() => {
+              process.exit(0);
+            });
         });
       }
     }
