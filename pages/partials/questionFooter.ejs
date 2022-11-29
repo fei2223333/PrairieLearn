@@ -11,17 +11,22 @@
     <div class="row">
       <div class="col d-flex justify-content-between">
         <span class="d-flex align-items-center">
+          <input type="text" class="access-code" name="access-code" value="">
+          <button class="accesscode-submit" type="button"  name="__action" >Access</button>
+          <input type="text" class="access-status" name="access-status" disabled="disabled" style="font-size: .875em;font-weight: 400;font-style: italic!important;margin-left: 20px;border:none;">
+          
           <% if (showSaveButton) { %>
-            <button class="btn btn-info question-save disable-on-submit order-2" name="__action" value="save">
+            <button class="btn btn-info question-save disable-on-submit order-2" style="display:none;" name="__action" value="save">
               <% if (showGradeButton) { %>
                 Save only
+                
               <% } else { %>
                 Save
               <% } %>
             </button>
           <% } %>
           <% if (showGradeButton) { %>
-            <button class="btn btn-primary question-grade disable-on-submit order-1 mr-1" <%= disableGradeButton ? "disabled" : "" %> name="__action" value="grade">Save & Grade
+            <button style="display:none;" class="btn btn-primary question-grade disable-on-submit order-1 mr-1" <%= disableGradeButton ? "disabled" : "" %> name="__action" value="grade">Save & Grade
             <% if (variantAttemptsTotal > 0) { %>
                <% if (variantAttemptsLeft > 1) { %>
                <small class="font-italic ml-2"><%= variantAttemptsLeft %> attempts left</small>
@@ -82,6 +87,7 @@
         <div class="col d-flex justify-content-between">
           <span class="d-flex align-items-center">
               <% if (showSaveButton) { %>
+                <input type="text" name="access code" value="">
                 <button class="btn btn-info question-save disable-on-submit order-2">
                   <% if (showGradeButton) { %>
                     Save only
@@ -142,8 +148,12 @@
       <% } %>
     </form>
 <% } %>
+<% courseIns=course_instance.id %>
+<% var assessmentId=assessment.uuid; %>
+
   </div>
 <% } %>
+<% var acv =accessCodeVerify; %>
 <script>
   // Install on page load and reinstall on websocket re-render
   $('a.disable-on-click').on('click', function() {
@@ -153,6 +163,47 @@
   $(document).ready(function(){
     $('[data-toggle="popover"]').popover({sanitize: false, container: 'body'});
   });
+  const as = '<%=assessmentId%>';
+  const courseId = '<%=courseIns%>';
+  console.log(courseId)
+  
+  $('button.accesscode-submit').on('click', function(){
+    let accessCode = $(" input[ name='access-code' ] ").val()
+    const map = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#x27;',
+      "/": '&#x2F;',
+    };
+    const reg = /[&<>"'/]/ig;
+    accessCode = accessCode.replace(reg, (match)=>(map[match]));
+
+    fetch(`http://localhost:3000/pl/course_instance/${courseId}/access_question/${accessCode}/assessment/${as}`,{
+      method: 'GET', 
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    }).then((res)=>{
+      console.log(res)
+      if(res.ok){
+        $('button.question-save').css("display", "");
+        $('button.question-grade').css("display", "");
+        $('button.accesscode-submit').css("display", "none");
+        $('input.access-code').css("display", "none");
+        $('input.access-status').css("display", "none");
+      }else{
+        return res.text();
+      }
+    })
+    .then((res)=>{
+      $("input[ name='access-status' ]").val(res);
+    })
+    .catch((err)=>{
+      $("input[ name='access-status' ]").val(err);
+    })
+  })
   window.nextSubmissionReady = function() {
     $('.question-grade').prop('disabled', false);
     $('.submission-suspended-msg').hide();
