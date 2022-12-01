@@ -6,6 +6,7 @@ const sqlLoader = require('../../prairielib/lib/sql-loader');
 const config = require('../../lib/config');
 const perf = require('../performance')('assessments');
 const infofile = require('../infofile');
+const { generateTOTP } = require('../../totp');
 
 const sql = sqlLoader.loadSqlEquiv(__filename);
 
@@ -302,6 +303,7 @@ module.exports.sync = async function (courseId, courseInstanceId, assessments, q
     });
   }
   const assessmentParams = Object.entries(assessments).map(([tid, assessment]) => {
+    generateTOTP(assessment.uuid);
     return JSON.stringify([
       tid,
       assessment.uuid,
