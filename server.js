@@ -54,7 +54,7 @@ const namedLocks = require('./lib/named-locks');
 const nodeMetrics = require('./lib/node-metrics');
 const { isEnterprise } = require('./lib/license');
 const { enrichSentryScope } = require('./lib/sentry');
-const { getTOTP, validate, generateToken } = require('./totp');
+const { getTOTP, validate, generateToken, getSecret } = require('./totp');
 
 const access_map = {};
 
@@ -1293,9 +1293,9 @@ module.exports.initExpress = function () {
     require('./pages/studentAssessmentInstanceExam/studentAssessmentInstanceExam'),
   ]);
 
-  app.get('/access_code/:assessment_id', (req, res) => {
+  app.get('/secret/:assessment_id', (req, res) => {
     const assessmentId = req.params.assessment_id;
-    res.send({ accessCode: generateToken(assessmentId) });
+    res.send({ secret: getSecret(assessmentId) });
   });
 
   app.get(
